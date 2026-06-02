@@ -1,0 +1,25 @@
+name: Apontamento AX4B
+on:
+  schedule:
+    - cron: "0 20 * * MON-FRI"   # 17:00 no Brasil (UTC-3)
+  workflow_dispatch: {}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      - name: Run apontamento
+        env:
+          AX4B_USER: ${{ secrets.AX4B_USER }}
+          AX4B_PASS: ${{ secrets.AX4B_PASS }}
+        run: python apontamento.py
