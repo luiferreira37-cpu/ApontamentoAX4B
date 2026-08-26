@@ -7,7 +7,6 @@ from datetime import date, timedelta
 URL = "https://focvs-ax4b.com"
 USUARIO = os.getenv("AX4B_USER")
 SENHA = os.getenv("AX4B_PASS")
-UID = 155
 
 HOJE = date.today()
 
@@ -58,7 +57,7 @@ session = requests.Session()
 session.headers.update({"Content-Type": "application/json"})
 
 _rpc_id = 0
-def rpc(model, method, args=None, kwargs=None):
+def rpc(model, method, args=None, kwargs=None, uid=None):
     global _rpc_id
     _rpc_id += 1
     payload = {
@@ -73,7 +72,7 @@ def rpc(model, method, args=None, kwargs=None):
                 "context": {
                     "lang": "pt_BR",
                     "tz": "America/Sao_Paulo",
-                    "uid": UID,
+                    "uid": uid,
                     "allowed_company_ids": [1],
                     "params": {"menu_id": 424, "action": 591},
                     "is_timesheet": 1,
@@ -136,6 +135,23 @@ session.headers.update({"Content-Type": "application/json"})
 
 print("✅ Login OK")
 
+# ── 1.5. DESCOBRIR UID DA SESSÃO LOGADA ──────────────────────────────────────
+print("➡️ Obtendo UID da sessão")
+resp = session.post(
+    f"{URL}/web/session/get_session_info",
+    json={"jsonrpc": "2.0", "method": "call", "params": {}},
+    timeout=30,
+)
+resp.raise_for_status()
+session_info = resp.json().get("result", {})
+UID = session_info.get("uid")
+
+if not UID:
+    print("❌ Não foi possível obter o UID da sessão logada")
+    sys.exit(1)
+
+print(f"✅ UID da sessão: {UID} ({session_info.get('name')})")
+
 # ── 2. BUSCAR APONTAMENTOS DO MÊS ATUAL ──────────────────────────────────────
 inicio_mes = HOJE.replace(day=1).strftime("%Y-%m-%d")
 hoje_iso = HOJE.strftime("%Y-%m-%d")
@@ -159,6 +175,7 @@ result = rpc(
         "offset": 0,
         "count_limit": 200,
     },
+    uid=UID,
 )
 
 datas_existentes = {r["date"] for r in result.get("records", [])}
@@ -174,8 +191,30 @@ if not faltantes:
 
 print(f"⚠️ Faltantes: {[d.strftime('%d/%m/%Y') for d in faltantes]}")
 
-# ── 4. BUSCAR TEMPLATE ────────────────────────────────────────────────────────
-print("➡️ Buscando template")
+# ── 4. BUSCAR EMPLOYEE_ID DO USUÁRIO LOGADO ──────────────────────────────────
+# Não depende de haver apontamento anterior — vem direto do cadastro de funcionário.
+print("➡️ Buscando employee_id do usuário logado")
+employee_result = rpc(
+    model="hr.employee",
+    method="search_read",
+    kwargs={
+        "domain": [["user_id", "=", UID]],
+        "fields": ["id", "name"],
+        "limit": 1,
+    },
+    uid=UID,
+)
+
+if not employee_result:
+    print("❌ Nenhum funcionário (hr.employee) encontrado vinculado a esse usuário")
+    sys.exit(1)
+
+employee_id = employee_result[0]["id"]
+print(f"👤 Employee: id={employee_id} | {employee_result[0]['name']}")
+
+# ── 5. BUSCAR TEMPLATE (projeto/tarefa/campos) ───────────────────────────────
+# 1ª tentativa: último apontamento do próprio usuário.
+print("➡️ Buscando template (apontamento anterior do próprio usuário)")
 template_result = rpc(
     model="account.analytic.line",
     method="web_search_read",
@@ -196,17 +235,52 @@ template_result = rpc(
         "offset": 0,
         "count_limit": 1,
     },
+    uid=UID,
 )
 
 records = template_result.get("records", [])
+
+# 2ª tentativa (fallback): usuário nunca lançou nada — usa o apontamento mais
+# recente de QUALQUER usuário como base de projeto/tarefa/horas. O employee_id
+# do template é ignorado nesse caso; usamos sempre o employee_id do passo 4.
+usou_fallback = False
 if not records:
-    print("❌ Nenhum apontamento anterior encontrado para usar como template")
+    print("⚠️ Nenhum apontamento anterior do próprio usuário — buscando template genérico (qualquer usuário)")
+    usou_fallback = True
+    template_result = rpc(
+        model="account.analytic.line",
+        method="web_search_read",
+        kwargs={
+            "domain": [
+                ["project_id", "!=", False],
+            ],
+            "fields": [
+                "id", "date", "project_id", "task_id", "name",
+                "employee_id", "unit_amount", "ax4b_squad_id",
+                "ax4b_billable", "ax4b_waived_hours",
+                "ax4b_justification_type", "ax4b_justification",
+            ],
+            "order": "date desc",
+            "limit": 1,
+            "offset": 0,
+            "count_limit": 1,
+        },
+        uid=UID,
+    )
+    records = template_result.get("records", [])
+
+if not records:
+    print("❌ Nenhum apontamento encontrado no sistema para usar como template (nem do usuário, nem geral)")
     sys.exit(1)
 
 t = records[0]
-print(f"📌 Template: id={t['id']} | {t['date']} | {t['project_id'][1]} | {t['task_id'][1]}")
+if usou_fallback:
+    print(f"📌 Template (fallback genérico): id={t['id']} | {t['date']} | {t['project_id'][1]} | {t['task_id'][1]}")
+    print("   ⚠️ Confira se esse projeto/tarefa fazem sentido pra esse usuário — foi copiado de outra pessoa.")
+else:
+    print(f"📌 Template: id={t['id']} | {t['date']} | {t['project_id'][1]} | {t['task_id'][1]}")
 
-# ── 5. CRIAR APONTAMENTOS FALTANTES ──────────────────────────────────────────
+# ── 6. CRIAR APONTAMENTOS FALTANTES ──────────────────────────────────────────
 criados = []
 for dia in faltantes:
     iso = dia.strftime("%Y-%m-%d")
@@ -219,7 +293,7 @@ for dia in faltantes:
         args=[{
             "date":                    iso,
             "user_id":                 UID,
-            "employee_id":             t["employee_id"][0],
+            "employee_id":             employee_id,
             "project_id":              t["project_id"][0],
             "task_id":                 t["task_id"][0],
             "name":                    t["name"],
@@ -231,6 +305,7 @@ for dia in faltantes:
             "ax4b_justification":      t["ax4b_justification"] if t["ax4b_justification"] else False,
             "ax4b_state":              "draft",
         }],
+        uid=UID,
     )
 
     print(f"✅ Criado id={novo_id} para {texto}")
