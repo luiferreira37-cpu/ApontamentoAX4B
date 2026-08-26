@@ -7,7 +7,6 @@ from datetime import date, timedelta
 URL = "https://focvs-ax4b.com"
 USUARIO = os.getenv("AX4B_USER")
 SENHA = os.getenv("AX4B_PASS")
-UID = 145
 
 HOJE = date.today()
 
@@ -58,7 +57,7 @@ session = requests.Session()
 session.headers.update({"Content-Type": "application/json"})
 
 _rpc_id = 0
-def rpc(model, method, args=None, kwargs=None):
+def rpc(model, method, args=None, kwargs=None, uid=None):
     global _rpc_id
     _rpc_id += 1
     payload = {
@@ -73,7 +72,7 @@ def rpc(model, method, args=None, kwargs=None):
                 "context": {
                     "lang": "pt_BR",
                     "tz": "America/Sao_Paulo",
-                    "uid": UID,
+                    "uid": uid,
                     "allowed_company_ids": [1],
                     "params": {"menu_id": 424, "action": 591},
                     "is_timesheet": 1,
@@ -136,6 +135,23 @@ session.headers.update({"Content-Type": "application/json"})
 
 print("✅ Login OK")
 
+# ── 1.5. DESCOBRIR UID DA SESSÃO LOGADA ──────────────────────────────────────
+print("➡️ Obtendo UID da sessão")
+resp = session.post(
+    f"{URL}/web/session/get_session_info",
+    json={"jsonrpc": "2.0", "method": "call", "params": {}},
+    timeout=30,
+)
+resp.raise_for_status()
+session_info = resp.json().get("result", {})
+UID = session_info.get("uid")
+
+if not UID:
+    print("❌ Não foi possível obter o UID da sessão logada")
+    sys.exit(1)
+
+print(f"✅ UID da sessão: {UID} ({session_info.get('name')})")
+
 # ── 2. BUSCAR APONTAMENTOS DO MÊS ATUAL ──────────────────────────────────────
 inicio_mes = HOJE.replace(day=1).strftime("%Y-%m-%d")
 hoje_iso = HOJE.strftime("%Y-%m-%d")
@@ -159,6 +175,7 @@ result = rpc(
         "offset": 0,
         "count_limit": 200,
     },
+    uid=UID,
 )
 
 datas_existentes = {r["date"] for r in result.get("records", [])}
@@ -196,6 +213,7 @@ template_result = rpc(
         "offset": 0,
         "count_limit": 1,
     },
+    uid=UID,
 )
 
 records = template_result.get("records", [])
@@ -231,6 +249,7 @@ for dia in faltantes:
             "ax4b_justification":      t["ax4b_justification"] if t["ax4b_justification"] else False,
             "ax4b_state":              "draft",
         }],
+        uid=UID,
     )
 
     print(f"✅ Criado id={novo_id} para {texto}")
